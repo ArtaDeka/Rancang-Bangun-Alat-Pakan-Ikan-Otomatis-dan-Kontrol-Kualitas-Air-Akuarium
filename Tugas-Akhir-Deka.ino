@@ -4,8 +4,8 @@
 #define BLYNK_PRINT Serial
 
 const char* auth = "bLOWROJ22r_G0zV4EHhxf2XhNGdPRc6i"; // Masukkan Auth Token Blynk Anda
-const char* ssid = "AhmatStarboy";                       // Masukkan nama WiFi Anda
-const char* pass = "SempakeAhmatUkuran30";              // Masukkan password WiFi Anda
+const char* ssid = "VIP Putra";                       // Masukkan nama WiFi Anda
+const char* pass = "wiwin123";              // Masukkan password WiFi Anda
 
 // ------ 2. LIBRARY ------
 #include <WiFi.h>
@@ -34,25 +34,18 @@ const int POMPA_O2_RELAY_PIN = 27;
 // ------ 4. PENGATURAN KALIBRASI & LOGIKA ------
 const float R1 = 10000.0;
 const float R2 = 20000.0;
-const float TEGANGAN_Jernih = 1.8;
+const float TEGANGAN_Jernih = 2.0;
 const float TEGANGAN_Keruh  = 0.1;
 const int NTU_Jernih = 0;
 const int NTU_Keruh = 100;
 const float SUHU_PELTIER_ON  = 25.0;
 const float SUHU_PELTIER_OFF = 24.0;
-
-// =================================================================
-// PERUBAHAN DIMULAI DI SINI
-// Variabel pakan kosong dan pakan habis digabung menjadi satu
-// =================================================================
 const int JARAK_PAKAN_PENUH_CM = 4;
-const int JARAK_PAKAN_HABIS = 14; // Variabel ini sekarang mendefinisikan jarak untuk 0% sekaligus trigger notifikasi
-
-// Pengaturan takaran pakan berdasarkan putaran
+const int JARAK_PAKAN_HABIS = 14;
 const int POSISI_BUKA_SERVO = 45;
 const int POSISI_TUTUP_SERVO = 90;
-const int DELAY_BUKA_MS = 500;
-const int DELAY_ANTAR_PUTARAN_MS = 500;
+const int DELAY_BUKA_MS = 1000;
+const int DELAY_ANTAR_PUTARAN_MS = 1500;
 
 // ------ 5. DEFINISI PARAMETER & STATE LOGIKA FUZZY ------
 const float SUHU_DINGIN[] = {15, 15, 18, 21};
@@ -92,6 +85,9 @@ RTC_DS3231 rtc;
 BlynkTimer timer;
 Servo pakanServo;
 
+// --- Filter Moving Average Kekeruhan ---
+const int JUMLAH_SAMPEL_KEKERUHAN = 20; // Ambil 20 sampel untuk dirata-ratakan
+
 // ------ FUNGSI-FUNGSI BACA SENSOR ------
 void bacaSuhu() {
   sensors.requestTemperatures();
@@ -101,21 +97,28 @@ void bacaSuhu() {
   }
 }
 
+// --- Fungsi bacaKekeruhan() ---
 void bacaKekeruhan() {
-  int adcRaw = analogRead(TURBIDITY_PIN_ADC);
-  float voltageAtPin = (adcRaw / 4095.0) * 3.3;
+  long totalAdcRaw = 0;
+  // Ambil beberapa sampel secara cepat untuk mendapatkan rata-rata
+  for (int i = 0; i < JUMLAH_SAMPEL_KEKERUHAN; i++) {
+    totalAdcRaw += analogRead(TURBIDITY_PIN_ADC);
+    delay(10); // Jeda singkat antar sampel agar ADC stabil
+  }
+  long rerataAdcRaw = totalAdcRaw / JUMLAH_SAMPEL_KEKERUHAN;
+  
+  // Lakukan konversi ke NTU dari nilai rata-rata
+  float voltageAtPin = (rerataAdcRaw / 4095.0) * 3.3;
   float sensorVoltage = voltageAtPin * (R1 + R2) / R2;
   long sensorVoltageInt = sensorVoltage * 1000;
   long teganganJernihInt = TEGANGAN_Jernih * 1000;
   long teganganKeruhInt = TEGANGAN_Keruh * 1000;
   float ntu = map(sensorVoltageInt, teganganKeruhInt, teganganJernihInt, NTU_Keruh, NTU_Jernih);
+  
+  // Simpan hasil akhir yang sudah halus ke state global
   state.kekeruhanSaatIni = constrain(ntu, 0, 100);
 }
 
-// =================================================================
-// PERUBAHAN PADA FUNGSI BACA LEVEL PAKAN
-// Menggunakan variabel baru `JARAK_PAKAN_HABIS`
-// =================================================================
 void bacaLevelPakan() {
   digitalWrite(ULTRASONIC_PAKAN_TRIG_PIN, LOW); delayMicroseconds(2);
   digitalWrite(ULTRASONIC_PAKAN_TRIG_PIN, HIGH); delayMicroseconds(10);
@@ -123,21 +126,12 @@ void bacaLevelPakan() {
   
   long duration = pulseIn(ULTRASONIC_PAKAN_ECHO_PIN, HIGH, 25000);
   long currentDistance = duration * 0.0343 / 2;
-  
   state.jarakPakanCm = currentDistance;
   
-  // Batasi (constrain) pembacaan jarak antara jarak penuh dan jarak habis
   long constrainedDistance = constrain(currentDistance, JARAK_PAKAN_PENUH_CM, JARAK_PAKAN_HABIS);
-  
-  // Petakan (map) nilai jarak ke rentang persentase menggunakan variabel baru
   float persentase = map(constrainedDistance, JARAK_PAKAN_PENUH_CM, JARAK_PAKAN_HABIS, 100, 0);
-  
   state.persentasePakan = persentase;
 }
-// =================================================================
-// AKHIR DARI PERUBAHAN
-// =================================================================
-
 
 // ------ FUNGSI HIMPUNAN KEANGGOTAAN (FUZZY) ------
 float trimf(float x, const float params[]) {
@@ -156,6 +150,7 @@ float trapmf(float x, const float params[]) {
   if (x > c && x < d) return (d - x) / (d - c);
   return 0.0;
 }
+
 
 // ------ FUNGSI INTI LOGIKA FUZZY ------
 void fuzzifikasi() {
@@ -184,6 +179,7 @@ void defuzzifikasiCentroid() {
   float motor_lambat_strength = max(state.aturan[1], state.aturan[4]);
   float motor_sedang_strength = max(max(state.aturan[2], state.aturan[5]), state.aturan[7]);
   float motor_cepat_strength  = max(max(state.aturan[3], state.aturan[6]), max(state.aturan[8], state.aturan[9]));
+
   for (int y = 0; y <= 100; y++) {
     float mu_lambat = trimf(y, MOTOR_LAMBAT);
     float mu_sedang = trimf(y, MOTOR_SEDANG);
@@ -269,7 +265,6 @@ void cekDanKirimSisaPakan() {
     state.notifPakanTerkirim = false;
   }
 }
-
 
 void cekJadwalPakan() {
   DateTime now = rtc.now();
@@ -382,14 +377,13 @@ BLYNK_WRITE(V3) {
   Serial.println(jumlahPutaranPakan);
 }
 
-// BARU: Fungsi untuk kontrol manual Pompa O2
 BLYNK_WRITE(V8) {
-  int statusTombol = param.asInt(); // Baca status tombol (0 atau 1)
+  int statusTombol = param.asInt();
   if (statusTombol == 1) {
-    digitalWrite(POMPA_O2_RELAY_PIN, HIGH); // Nyalakan relay
+    digitalWrite(POMPA_O2_RELAY_PIN, HIGH);
     Serial.println("Pompa O2 Dinyalakan secara manual.");
   } else {
-    digitalWrite(POMPA_O2_RELAY_PIN, LOW); // Matikan relay
+    digitalWrite(POMPA_O2_RELAY_PIN, LOW);
     Serial.println("Pompa O2 Dimatikan secara manual.");
   }
 }
@@ -428,8 +422,8 @@ void setup() {
   Blynk.begin(auth, ssid, pass);
   Blynk.syncVirtual(V3, V4, V5, V8);
 
-  timer.setInterval(5000L, ambilDataDanJalankanFuzzy);
-  timer.setInterval(120000L, kirimDataKeBlynk);
+  timer.setInterval(5000L, ambilDataDanJalankanFuzzy);  
+  timer.setInterval(120000L, kirimDataKeBlynk);        
   timer.setInterval(6000L, cekJadwalPakan);
   
   Serial.println("Sistem Siap Digunakan!");
